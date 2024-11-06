@@ -1,7 +1,7 @@
-import { getReferenceByPointer, getByPointer, setByPointer, RefPoint } from './json-pointer-relational';
+import { getReferenceByPointer, getByPointer, setByPointer, RefPoint as RefPointDef } from './json-pointer-relational';
 export {
     getReferenceByPointer,
     getByPointer,
-    setByPointer,
-    RefPoint
+    setByPointer
 };
+export type RefPoint = RefPointDef;
