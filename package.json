@@ -1,0 +1,27 @@
+{
+  "name": "json-pointer-relational",
+  "version": "1.0.1",
+  "description": "A library for resolving JSON Pointers with extended relational support",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "tsc"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/RyanRutkin/json-pointer-relational.git"
+  },
+  "keywords": [
+    "json-pointer"
+  ],
+  "author": "Ryan Rutkin",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/RyanRutkin/json-pointer-relational/issues"
+  },
+  "homepage": "https://github.com/RyanRutkin/json-pointer-relational#readme",
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  }
+}
