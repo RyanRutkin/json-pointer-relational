@@ -2,7 +2,7 @@ export type RefPoint = {
     obj: any;
     key: string;
     normalizedPath: string;
-    parent: Record<string, any> | any[] | null;
+    parent: RefPoint | null;
 }
 
 function isNumeric(n: any): n is number {
@@ -141,7 +141,7 @@ export function getReferenceByPointer(pointers: string[] | string, obj: Record<s
                         obj: parentArr.obj[arrIdx],
                         key: String(arrIdx),
                         normalizedPath: `${prevPoint.normalizedPath}/${String(arrIdx)}`,
-                        parent: parentArr.obj
+                        parent: parentArr
                     });
                     curRef = refPoints[refPoints.length - 1];
                 }
@@ -165,7 +165,7 @@ export function getReferenceByPointer(pointers: string[] | string, obj: Record<s
                         obj: undefined,
                         key: '-',
                         normalizedPath: `${curRef.normalizedPath}/-`,
-                        parent: curRef.obj
+                        parent: curRef
                     });
                     curRef = refPoints[refPoints.length - 1];
                     // End logic for Array
@@ -181,7 +181,7 @@ export function getReferenceByPointer(pointers: string[] | string, obj: Record<s
                     obj: curRef.obj[numToken],
                     key: String(numToken),
                     normalizedPath: `${prevRef.normalizedPath}/${String(numToken)}`,
-                    parent: curRef.obj
+                    parent: curRef
                 });
                 curRef = refPoints[refPoints.length - 1];
                 // End logic for Array
@@ -208,7 +208,7 @@ export function getReferenceByPointer(pointers: string[] | string, obj: Record<s
                     obj: newRef,
                     key: token,
                     normalizedPath: `${prevRef.normalizedPath}/${token}`,
-                    parent: prevRef.obj
+                    parent: prevRef
                 });
             }
             curRef = refPoints[refPoints.length - 1];
@@ -237,12 +237,12 @@ export function setByPointer(value: any, pointers: string[] | string, obj: Recor
     if (!ref.parent) {
         throw new Error('Invalid JSON Pointer for SET. Cannot set root document');
     }
-    if (Array.isArray(ref.parent) && ref.key === '-') {
-        ref.parent.push(value);
-    } else if (Array.isArray(ref.parent)) {
-        ref.parent[parseInt(ref.key)] = value;
-    } else if (typeof ref.parent === 'object') {
-        ref.parent[ref.key] = value;
+    if (Array.isArray(ref.parent.obj) && ref.key === '-') {
+        ref.parent.obj.push(value);
+    } else if (Array.isArray(ref.parent.obj)) {
+        ref.parent.obj[parseInt(ref.key)] = value;
+    } else if (typeof ref.parent.obj === 'object') {
+        ref.parent.obj[ref.key] = value;
     } else {
         throw new Error(`Invalid JSON Pointer for SET. Cannot set property ${ref.key} of ${typeof ref.parent}`);
     }

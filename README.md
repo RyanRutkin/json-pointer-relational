@@ -41,12 +41,29 @@ All examples and rules defined in these documents should be expected to function
 
 ### getReferenceByPointer
 [^note]: For internal use - or a more detailed response
+#### Params
 - pointer (pointers)
 : `type: string | string[]` - A string representing a JSON Pointer. You may supply an array of strings, where each string represents a full JSON Pointer. Each JSON Pointer will be evaluated from the ending reference of the JSON Pointer before it in this array.
 - obj
 : `type: Record<string, any>` - A JSON compatible object. This object is expected to be JSON compatible.
 - tree (optional)
 : `type: RefPoint[]` - For internal use. This array represents the path this method has traveled throughout the data tree to arrive at its current node.
+
+#### Return
+`type: RefPoint` - A detailed reference to the resolved point in the data tree.
+
+## Types
+### RefPoint
+#### Members
+- obj
+: `type: any` - A reference to the represented point within the data tree.
+- key
+: `type: string` - The member name of this point within the parent object.
+- normalizedPath
+: `type: string` - A direct path to this node within the data tree. This might not be the same path that was taken to reach this node, but should represent the most direct path.
+- parent
+: `type: RefPoint | null` - A RefPoint of the immediate parent node, if available. If a `$ref` was resolved, this will represent the immediate parent of the object resolved from the `$ref`.
+
 
 ## Examples
 
