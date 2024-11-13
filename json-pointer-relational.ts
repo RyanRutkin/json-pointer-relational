@@ -9,7 +9,7 @@ function isNumeric(n: any): n is number {
     return !isNaN(parseFloat(n)) && isFinite(n);
 }
 
-const tokenizeJsonPointer = (pointer: string) => {
+export function tokenizeJsonPointer(pointer: string): string[] {
     return pointer.split(/\//).map(item => {
         const unescapedToken = unescapeJsonPointerToken(item);
         try {
@@ -64,10 +64,6 @@ export function getReferenceByPointer(pointers: string[] | string, obj: Record<s
                     refPoints = refPoints.slice(0,1);
                     curRef = refPoints[refPoints.length - 1];
                     continue;
-                }
-                // If this is the first pointer in the array of pointers, we have an invalid reference. Reject.
-                if (pointerIdx === 0) {
-                    throw new Error(`JSON Pointer invalid. Pointer 0. ${ pointers[0] }`);
                 }
                 // Check for relative reference
                 const navTokens = parseNavToken(token);
@@ -229,11 +225,11 @@ export function getByPointer(pointers: string[] | string, obj: Record<string, an
     return ref.obj;
 }
 
-export function setByPointer(value: any, pointer: string, obj: Record<string, any>): any;
-export function setByPointer(value: any, pointers: string[], obj: Record<string, any>): any;
-export function setByPointer(value: any, pointers: string[] | string, obj: Record<string, any>): any;
-export function setByPointer(value: any, pointers: string[] | string, obj: Record<string, any>): any {
-    const ref = getReferenceByPointer(pointers, obj);
+export function setByPointerWithRef(value: any, pointer: string, obj: Record<string, any>, tree?: RefPoint[]): any;
+export function setByPointerWithRef(value: any, pointers: string[], obj: Record<string, any>, tree?: RefPoint[]): any;
+export function setByPointerWithRef(value: any, pointers: string[] | string, obj: Record<string, any>, tree?: RefPoint[]): any;
+export function setByPointerWithRef(value: any, pointers: string[] | string, obj: Record<string, any>, tree?: RefPoint[]): any {
+    const ref = getReferenceByPointer(pointers, obj, tree);
     if (!ref.parent) {
         throw new Error('Invalid JSON Pointer for SET. Cannot set root document');
     }
@@ -246,5 +242,13 @@ export function setByPointer(value: any, pointers: string[] | string, obj: Recor
     } else {
         throw new Error(`Invalid JSON Pointer for SET. Cannot set property ${ref.key} of ${typeof ref.parent}`);
     }
+    return ref;
+}
+
+export function setByPointer(value: any, pointer: string, obj: Record<string, any>): any;
+export function setByPointer(value: any, pointers: string[], obj: Record<string, any>): any;
+export function setByPointer(value: any, pointers: string[] | string, obj: Record<string, any>): any;
+export function setByPointer(value: any, pointers: string[] | string, obj: Record<string, any>): any {
+    const ref = setByPointerWithRef(value, pointers, obj);
     return ref.obj;
 }
