@@ -10,6 +10,9 @@ function isNumeric(n: any): n is number {
 }
 
 export function tokenizeJsonPointer(pointer: string): string[] {
+    if (pointer === '/') {
+        return ['#'];
+    }
     return pointer.split(/\//).map(item => {
         const unescapedToken = unescapeJsonPointerToken(item);
         try {
@@ -17,7 +20,16 @@ export function tokenizeJsonPointer(pointer: string): string[] {
         } catch(_) {
             return unescapedToken;
         }
-    });
+    }).reduce((acc, cur, idx) => {
+        if (!cur && idx === 0) {
+            acc.push('#');
+            return acc;
+        }
+        if (cur) {
+            acc.push(cur);
+        }
+        return acc;
+    }, [] as string[])
 }
 
 const parseNavToken = (refToken: string) => {
