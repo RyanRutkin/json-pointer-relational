@@ -243,7 +243,10 @@ export function setByPointerWithRef(value: any, pointers: string[] | string, obj
 export function setByPointerWithRef(value: any, pointers: string[] | string, obj: Record<string, any>, tree?: RefPoint[]): any {
     const ref = getReferenceByPointer(pointers, obj, tree);
     if (!ref.parent) {
-        throw new Error('Invalid JSON Pointer for SET. Cannot set root document');
+        // throw new Error('Invalid JSON Pointer for SET. Cannot set root document');
+        // Oddly, there are some instances where setting the root document through this method makes sense.
+        obj = value;
+        return obj;
     }
     if (Array.isArray(ref.parent.obj) && ref.key === '-') {
         ref.parent.obj.push(value);
