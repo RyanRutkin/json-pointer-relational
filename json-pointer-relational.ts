@@ -3,48 +3,96 @@ export type RefPoint = {
     key: string;
     normalizedPath: string;
     parent: RefPoint | null;
+    /** A relative key (`0#`) is a computed result, not a writable location. */
+    computed?: boolean;
 }
 
-function isNumeric(n: any): n is number {
-    return !isNaN(parseFloat(n)) && isFinite(n);
+// Security restriction for the 1.x API: JSON can contain these keys, but
+// following or assigning them through JavaScript's prototype chain is unsafe.
+function assertSafeKey(key: string): void {
+    if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+        throw new Error(`Unsafe JSON Pointer property: ${key}`);
+    }
+}
+
+function assertSafeContainer(value: any): void {
+    const constructor = value && typeof value === 'object'
+        ? Object.getOwnPropertyDescriptor(value, 'constructor')?.value
+        : undefined;
+    if (value === Object.prototype || value === Array.prototype || value === Function.prototype ||
+        (typeof constructor === 'function' && constructor.prototype === value)) {
+        throw new Error('Unsafe JSON Pointer target: prototype object');
+    }
+}
+
+function assertTrustedTree(tree: RefPoint[], root: object): void {
+    if (!tree.length || tree[0].obj !== root || tree[0].parent !== null) {
+        throw new Error('Invalid JSON Pointer reference tree');
+    }
+    for (const point of tree) {
+        const visited = new Set<RefPoint>();
+        let current: RefPoint | null = point;
+        while (current && current.parent) {
+            if (visited.has(current)) throw new Error('Invalid JSON Pointer reference tree');
+            visited.add(current);
+            const parent: RefPoint = current.parent;
+            assertSafeKey(current.key);
+            assertSafeContainer(parent.obj);
+            if (!parent.obj || typeof parent.obj !== 'object' ||
+                !Object.keys(parent.obj).some(key =>
+                    key !== '__proto__' && key !== 'constructor' && key !== 'prototype' && parent.obj[key] === current!.obj) &&
+                !(current.obj === undefined && !Object.prototype.hasOwnProperty.call(parent.obj, current.key))) {
+                throw new Error('Invalid JSON Pointer reference tree');
+            }
+            current = parent;
+        }
+        if (!current || current.obj !== root || current.parent !== null) {
+            throw new Error('Invalid JSON Pointer reference tree');
+        }
+    }
 }
 
 export function tokenizeJsonPointer(pointer: string): string[] {
-    if (pointer === '/') {
-        return ['#'];
+    if (pointer === '' || pointer === '#') return ['#'];
+    const decoded = pointer.startsWith('#') ? decodeURIComponent(pointer.slice(1)) : pointer;
+    if (decoded.startsWith('/')) {
+        return ['#', ...decoded.slice(1).split('/').map(unescapeJsonPointerToken)];
     }
-    return pointer.split(/\//).map(item => {
-        const unescapedToken = unescapeJsonPointerToken(item);
-        try {
-            return decodeURI(unescapedToken);
-        } catch(_) {
-            return unescapedToken;
-        }
-    }).reduce((acc, cur, idx) => {
-        if (!cur && idx === 0) {
-            acc.push('#');
-            return acc;
-        }
-        if (cur) {
-            acc.push(cur);
-        }
-        return acc;
-    }, [] as string[])
-}
-
-const parseNavToken = (refToken: string) => {
-    return refToken.match(/\d+|-|\+|#/g);
+    // Relative JSON Pointers are strings, not URI fragment identifiers.
+    if (pointer.startsWith('#')) throw new Error(`Invalid JSON Pointer: ${pointer}`);
+    const relative = /^(0|[1-9][0-9]*)(?:([+-])(0|[1-9][0-9]*))?(#)?(?=\/|$)/.exec(pointer);
+    if (!relative) throw new Error(`Invalid relative JSON Pointer: ${pointer}`);
+    const prefix = relative[0];
+    const suffix = pointer.slice(prefix.length);
+    if (relative[4] && suffix) throw new Error(`Invalid relative JSON Pointer: ${pointer}`);
+    if (suffix && !suffix.startsWith('/')) throw new Error(`Invalid relative JSON Pointer: ${pointer}`);
+    return [prefix, ...(suffix ? suffix.slice(1).split('/').map(unescapeJsonPointerToken) : [])];
 }
 
 const unescapeJsonPointerToken = (token: string) => {
-    // First replace ~1 with /, then ~0 with ~
+    if (/~(?![01])/.test(token)) throw new Error(`Invalid JSON Pointer escape: ${token}`);
+    // First replace ~1 with /, then ~0 with ~ (RFC 6901 §4).
     return String(token).replace(/~1/g, '/').replace(/~0/g, '~');
+}
+
+const escapeJsonPointerToken = (token: string) => token.replace(/~/g, '~0').replace(/\//g, '~1');
+
+function physicalChain(point: RefPoint): RefPoint[] {
+    const chain: RefPoint[] = [];
+    for (let current: RefPoint | null = point; current; current = current.parent) chain.unshift(current);
+    return chain;
 }
 
 export function getReferenceByPointer(pointer: string, obj: Record<string, any>, tree?: RefPoint[]): RefPoint;
 export function getReferenceByPointer(pointers: string[], obj: Record<string, any>, tree?: RefPoint[]): RefPoint;
 export function getReferenceByPointer(pointers: string[] | string, obj: Record<string, any>, tree?: RefPoint[]): RefPoint;
 export function getReferenceByPointer(pointers: string[] | string, obj: Record<string, any>, tree?: RefPoint[]): RefPoint {
+    return resolveReferenceByPointer(pointers, obj, tree);
+}
+
+function resolveReferenceByPointer(pointers: string[] | string, obj: Record<string, any>, tree?: RefPoint[], allowFinalArrayAppend = false): RefPoint {
+    assertSafeContainer(obj);
+    if (tree) assertTrustedTree(tree, obj);
     // Each index of the pointers array acts as a JSON Pointer
     // The first must be based on the root of the document
     // All following pointers may be relative to the last location of the previous pointer
@@ -66,6 +114,9 @@ export function getReferenceByPointer(pointers: string[] | string, obj: Record<s
         for (let partIdx = 0; partIdx < tokens.length; partIdx++) {
             // First, unescape the token
             const token = tokens[partIdx];
+            // The legacy tokenizer has already performed token unescaping and
+            // percent-decoding. Check the effective token, not the input text.
+            if (partIdx > 0) assertSafeKey(token);
             // Handle document navigation, either directly to the root or relatively
             if (partIdx === 0) {
                 // There are plenty of special cases for the beginning of a JSON Pointer
@@ -78,97 +129,56 @@ export function getReferenceByPointer(pointers: string[] | string, obj: Record<s
                     continue;
                 }
                 // Check for relative reference
-                const navTokens = parseNavToken(token);
-                if (!navTokens) {
-                    // The only thing that should be prefixing a JSON Pointer at this point is a relative reference
-                    // This is an error state and the JSON Pointer is invalid.
-                    throw new Error(`JSON Pointer invalid. Pointer ${pointerIdx}. ${ pointers[pointerIdx] }`);
+                const relative = /^(0|[1-9][0-9]*)(?:([+-])(0|[1-9][0-9]*))?(#)?$/.exec(token);
+                if (!relative) throw new Error(`Invalid relative JSON Pointer: ${pointers[pointerIdx]}`);
+                const depth = Number(relative[1]);
+                if (!Number.isSafeInteger(depth) || depth >= refPoints.length) {
+                    throw new Error(`Invalid relative JSON Pointer. Exceeded top of parent tree. Pointer ${pointerIdx}. ${pointers[pointerIdx]}`);
                 }
-                for (let navTokenIdx = 0; navTokenIdx < navTokens.length; navTokenIdx++) {
-                    const navToken = navTokens[navTokenIdx];
-                    if (navToken === '#' && navTokenIdx < navTokens.length-1) {
-                        throw new Error(`Invalid relative JSON Pointer. Cannot index into relative key. Pointer ${pointerIdx}. ${ pointers[pointerIdx] }`);
+                refPoints = refPoints.slice(0, refPoints.length - depth);
+                curRef = refPoints[refPoints.length - 1];
+
+                if (relative[2]) {
+                    const shift = Number(relative[3]);
+                    const parentArr = curRef.parent;
+                    if (!Number.isSafeInteger(shift) || !parentArr || !Array.isArray(parentArr.obj) ||
+                        !/^(0|[1-9][0-9]*)$/.test(curRef.key)) {
+                        throw new Error(`Invalid relative JSON Pointer. Current value is not an array item. Pointer ${pointerIdx}. ${pointers[pointerIdx]}`);
                     }
-                    if (navToken === '#' && refPoints.length === 1) {
-                        throw new Error(`Invalid relative JSON Pointer. No relative key for document root. Pointer ${pointerIdx}. ${ pointers[pointerIdx] }`);
+                    assertSafeContainer(parentArr.obj);
+                    const arrIdx = Number(curRef.key) + (relative[2] === '+' ? shift : -shift);
+                    if (!Number.isSafeInteger(arrIdx) || arrIdx < 0 || arrIdx >= parentArr.obj.length ||
+                        !Object.prototype.hasOwnProperty.call(parentArr.obj, arrIdx)) {
+                        throw new Error(`Invalid relative JSON Pointer. Shifted index out of bounds. Pointer ${pointerIdx}. ${pointers[pointerIdx]}`);
                     }
-                    if (navToken === '#' && (tokens.length > 1 || pointerIdx < pointers.length-1)) {
-                        // Getting the current relative key is the end of the line. There can't be anything after this
-                        throw new Error(`Invalid relative JSON Pointer. Cannot index into relative key.`);
+                    curRef = {
+                        obj: parentArr.obj[arrIdx], key: String(arrIdx),
+                        normalizedPath: `${parentArr.normalizedPath}/${arrIdx}`, parent: parentArr
+                    };
+                    refPoints = physicalChain(curRef);
+                }
+                if (relative[4]) {
+                    if (!curRef.parent || partIdx !== tokens.length - 1 || pointerIdx !== pointers.length - 1) {
+                        throw new Error('Invalid relative JSON Pointer. Relative key must be terminal and have a parent.');
                     }
-                    if (navToken === '#') {
-                        // End of the line. Return the key of the current location.
-                        return {
-                            obj: curRef.key,
-                            key: '#',
-                            normalizedPath: `#`,
-                            parent: curRef.obj
-                        };
-                    }
-                    if (isNumeric(navToken)) {
-                        const numDocRef = parseInt(navToken);
-                        if (numDocRef > refPoints.length) {
-                            // Tree reversal exceeded hierarchy. Reject.
-                            throw new Error(`Invalid relative JSON Pointer. Exceeded top of parent tree. Pointer ${pointerIdx}. ${ pointers[pointerIdx] }`);
-                        }
-                        refPoints = refPoints.slice(0, refPoints.length - numDocRef);
-                        curRef = refPoints[refPoints.length - 1];
-                        continue;
-                    }
-                    // If the value isn't numeric, it must be moving back or forward in an array
-                    // Our parent must be an array
-                    if (refPoints.length < 2) {
-                        // There is no parent array if there is no parent
-                        throw new Error(`Invalid relative JSON Pointer. Parent is not an array. Pointer ${pointerIdx}. ${ pointers[pointerIdx] }`);
-                    }
-                    const parentArr = refPoints[refPoints.length - 2];
-                    if (!Array.isArray(parentArr.obj)) {
-                        throw new Error(`Invalid relative JSON Pointer. Parent is not an array. Pointer ${pointerIdx}. ${ pointers[pointerIdx] }`);
-                    }
-                    // At this point, our current nav token must either be + or -
-                    // Look forward to the next nav token and ensure it is numeric
-                    if (navTokenIdx === navTokens.length - 1) {
-                        throw new Error(`Invalid relative JSON Pointer. No amount of index shift provided in relative navigation. Pointer ${pointerIdx}. ${ pointers[pointerIdx] }`);
-                    }
-                    if (!isNumeric(navTokens[navTokenIdx+1])) {
-                        throw new Error(`Invalid relative JSON Pointer. Index shift must be numeric. Pointer ${pointerIdx}. ${ pointers[pointerIdx] }`);
-                    }
-                    const indexShift = parseInt(navTokens[navTokenIdx+1]);
-                    // Increase index to skip next navToken
-                    navTokenIdx++;
-                    // Since our parent is an array, our curRef.key is a array index
-                    const arrIdx = parseInt(curRef.key)+(navToken === '+' ? indexShift : -1*indexShift);
-                    if (arrIdx < 0 || arrIdx > parentArr.obj.length-1) {
-                        throw new Error(`Invalid relative JSON Pointer. Index exceeds parent arround bounds. Pointer ${pointerIdx}. ${ pointers[pointerIdx] }`);
-                    }
-                    // Snip off the last point in refPoints
-                    refPoints = refPoints.slice(0, refPoints.length - 2);
-                    // Add on the new point as the current array index
-                    const prevPoint = refPoints[refPoints.length - 1];
-                    refPoints.push({
-                        obj: parentArr.obj[arrIdx],
-                        key: String(arrIdx),
-                        normalizedPath: `${prevPoint.normalizedPath}/${String(arrIdx)}`,
-                        parent: parentArr
-                    });
-                    curRef = refPoints[refPoints.length - 1];
+                    return {
+                        obj: Array.isArray(curRef.parent.obj) ? Number(curRef.key) : curRef.key,
+                        key: '#', normalizedPath: `${curRef.normalizedPath}#`, parent: curRef, computed: true
+                    };
                 }
                 // End logic for pre-navigation
                 continue;
             }
             // Proceed with regular JSON Pointer resolution
             if (Array.isArray(curRef.obj)) {
-                const navTokens = parseNavToken(token);
-                // This should result in an array with a single element, being numeric
-                // Per the spec "-" is valid for referencing the non-existent element
-                // past the end of the array, but also that it will always result in
-                // an error condition.
-                if (!navTokens || navTokens.length > 1 || (navTokens[0] !== '-' && !isNumeric(navTokens[0]))) {
+                assertSafeContainer(curRef.obj);
+                if (token !== '-' && !/^(0|[1-9][0-9]*)$/.test(token)) {
                     throw new Error(`Invalid JSON Pointer. Arrays must be indexed by numeric indices. Pointer ${pointerIdx}. ${ pointers[pointerIdx] }`);
                 }
-                // We only want the json pointer to fail on - if we are doing a get and not a set
-                // Therefore, this method should succeed, and the caller should return the error
-                if (navTokens[0] === '-') {
+                const isFinalWriteTarget = allowFinalArrayAppend &&
+                    pointerIdx === pointers.length - 1 && partIdx === tokens.length - 1;
+                if (token === '-') {
+                    if (!isFinalWriteTarget) throw new Error('Invalid JSON Pointer. Cannot read or descend through array append position.');
                     refPoints.push({
                         obj: undefined,
                         key: '-',
@@ -180,14 +190,18 @@ export function getReferenceByPointer(pointers: string[] | string, obj: Record<s
                     continue;
                 }
 
-                const numToken = parseInt(navTokens[0]);
-                if (numToken >= curRef.obj.length) {
+                const numToken = Number(token);
+                // A setter may append at index === length, but only at its
+                // final destination. Reads and intermediate hops still fail.
+                if (!Number.isSafeInteger(numToken) || numToken > curRef.obj.length ||
+                    (numToken === curRef.obj.length && !isFinalWriteTarget) ||
+                    (numToken < curRef.obj.length && !Object.prototype.hasOwnProperty.call(curRef.obj, numToken))) {
                     throw new Error(`Invalid JSON Pointer. Referenced index exceeds parent array length. Pointer ${pointerIdx}. ${ pointers[pointerIdx] }`);
                 }
                 const prevRef = refPoints[refPoints.length - 1];
                 refPoints.push({
                     obj: curRef.obj[numToken],
-                    key: String(numToken),
+                    key: token,
                     normalizedPath: `${prevRef.normalizedPath}/${String(numToken)}`,
                     parent: curRef
                 });
@@ -198,24 +212,29 @@ export function getReferenceByPointer(pointers: string[] | string, obj: Record<s
             if (!curRef.obj || typeof curRef.obj !== 'object') {
                 throw new Error(`Invalid JSON Pointer. Attempt to index non-object. Pointer ${pointerIdx}. ${ pointers[pointerIdx] }`);
             }
+            assertSafeContainer(curRef.obj);
+            if (!Object.prototype.hasOwnProperty.call(curRef.obj, token) &&
+                (partIdx < tokens.length - 1 || pointerIdx < pointers.length - 1 || !allowFinalArrayAppend)) {
+                throw new Error(`Invalid JSON Pointer. Cannot read or traverse missing property: ${token}`);
+            }
             // Handle $ref
             // TODO - Test for infinite recursion error. Will it break?
-            let newRef = curRef.obj[token];
-            if (newRef && typeof newRef === 'object' && !Array.isArray(newRef) && newRef['$ref']) {
+            let newRef = Object.prototype.hasOwnProperty.call(curRef.obj, token) ? curRef.obj[token] : undefined;
+            if (newRef && typeof newRef === 'object' && !Array.isArray(newRef) &&
+                Object.prototype.hasOwnProperty.call(newRef, '$ref') && newRef['$ref']) {
                 const resolvedRef = getReferenceByPointer([newRef['$ref']], obj, refPoints);
                 // Use parent from the resolved ref
                 // If we were to set a value using a path that required a resolved ref,
                 // the tree referenced would need to be from the resolved area downward.
-                refPoints.push({
-                    ...resolvedRef,
-                    key: token
-                });
+                // A reference hop changes the physical location. Relative
+                // pointers subsequently ascend from that location, not the alias.
+                refPoints = physicalChain(resolvedRef);
             } else {
                 const prevRef = refPoints[refPoints.length - 1];
                 refPoints.push({
                     obj: newRef,
                     key: token,
-                    normalizedPath: `${prevRef.normalizedPath}/${token}`,
+                    normalizedPath: `${prevRef.normalizedPath}/${escapeJsonPointerToken(token)}`,
                     parent: prevRef
                 });
             }
@@ -231,9 +250,6 @@ export function getByPointer(pointers: string[], obj: Record<string, any>): any;
 export function getByPointer(pointers: string[] | string, obj: Record<string, any>): any;
 export function getByPointer(pointers: string[] | string, obj: Record<string, any>): any {
     const ref = getReferenceByPointer(pointers, obj);
-    if (Array.isArray(ref.parent) && ref.key === '-') {
-        throw new Error(`Invalid JSON Pointer. Referenced index exceeds parent array length.`);
-    }
     return ref.obj;
 }
 
@@ -241,12 +257,18 @@ export function setByPointerWithRef(value: any, pointer: string, obj: Record<str
 export function setByPointerWithRef(value: any, pointers: string[], obj: Record<string, any>, tree?: RefPoint[]): any;
 export function setByPointerWithRef(value: any, pointers: string[] | string, obj: Record<string, any>, tree?: RefPoint[]): any;
 export function setByPointerWithRef(value: any, pointers: string[] | string, obj: Record<string, any>, tree?: RefPoint[]): any {
-    const ref = getReferenceByPointer(pointers, obj, tree);
+    const ref = resolveReferenceByPointer(pointers, obj, tree, true);
+    if (ref.computed) throw new Error('Invalid JSON Pointer for SET. A relative key is not a writable location.');
     if (!ref.parent) {
         // throw new Error('Invalid JSON Pointer for SET. Cannot set root document');
         // Oddly, there are some instances where setting the root document through this method makes sense.
         obj = value;
         return obj;
+    }
+    assertSafeKey(ref.key);
+    assertSafeContainer(ref.parent.obj);
+    if (ref.parent.obj === null || typeof ref.parent.obj !== 'object') {
+        throw new Error('Invalid JSON Pointer for SET. Parent is not an object');
     }
     if (Array.isArray(ref.parent.obj) && ref.key === '-') {
         ref.parent.obj.push(value);
