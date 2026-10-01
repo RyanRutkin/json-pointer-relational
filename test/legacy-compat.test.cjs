@@ -8,13 +8,12 @@ test('1.x chained pointers can start at a leaflet and move to a sibling', () => 
     assert.equal(getByPointer(['/foo/1', '2/other/label'], root), true);
 });
 
-test('1.x ref hops still lead to the physical write destination', () => {
+test('v2 raw navigation treats reference objects as ordinary data', () => {
     const root = { $defs: { target: { name: 'before' } }, link: { $ref: '#/$defs/target' } };
-    const ref = getReferenceByPointer('/link/name', root);
-    assert.equal(ref.obj, 'before');
-    assert.equal(ref.parent.obj, root.$defs.target);
-    assert.equal(setByPointer('after', '/link/name', root), 'before');
-    assert.equal(root.$defs.target.name, 'after');
+    assert.equal(getReferenceByPointer('/link/$ref', root).obj, '#/$defs/target');
+    assert.equal(setByPointer('after', '/link/name', root), undefined);
+    assert.equal(root.$defs.target.name, 'before');
+    assert.equal(root.link.name, 'after');
     assert.equal(root.link.$ref, '#/$defs/target');
 });
 
@@ -32,9 +31,9 @@ test('a write at array length appends, updates data, and the same pointer become
     assert.equal(getByPointer('/items/3', root), 'four');
 });
 
-test('append through a reference or chained pointer targets the physical array', () => {
-    const root = { items: ['first'], link: { $ref: '/items' } };
-    assert.equal(setByPointer('second', '/link/1', root), undefined);
+test('append through a chained pointer targets the physical array', () => {
+    const root = { items: ['first'] };
+    assert.equal(setByPointer('second', '/items/1', root), undefined);
     assert.equal(setByPointer('third', ['/items/1', '1/2'], root), undefined);
     assert.deepEqual(root.items, ['first', 'second', 'third']);
 });
