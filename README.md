@@ -4,12 +4,28 @@ A lightweight JS JSON-Pointer library that provides methods for getting and sett
 ## Testing Playground
 You can test the functionality of this library at the [JSON-Pointer-Relational Playground](https://ryanrutkin.github.io/json-pointer-relational-playground/).
 
-The playground isn't pretty, but it should demonstrate the capabilities of this library.
+The playground demonstrates the capabilities of this library.
+
+### Repository playground (current source)
+
+The React playground in [playground/](playground/) imports the library directly from this repository. It lets you edit a JSON document, run `getByPointer`, or supply a JSON value and run `setByPointer`. After a write, the document editor displays the mutated data, and the output shows the previous value and updated document. You can also supply a JSON array of pointer strings to try chained leaflet-relative navigation. Inputs run locally in the browser; the playground does not send them to a server.
+
+From the repository root, install playground dependencies once with `npm run playground:install`, then start it with `npm run playground`. Open the local URL shown by Vite (typically `http://127.0.0.1:5173/json-pointer-relational/`). Use `npm run playground:build` to verify the production build or `npm run playground:preview` to inspect it locally. Playground dependencies are separate from the library and its files are excluded from the npm package.
+
+The [Pages deployment workflow](.github/workflows/playground.yml) builds and publishes only the playground on pushes to `master` or via manual dispatch. After merging, set the repository's **Settings → Pages → Build and deployment → Source** to **GitHub Actions**. The site will be served at `https://ryanrutkin.github.io/json-pointer-relational/` once the workflow completes. Publishing the playground does not publish a new npm package.
 
 ## Funtionality
 This library adheres to the rules for interpretting a json-pointer as laid out by the [RFC 6901 proposed standard](https://datatracker.ietf.org/doc/html/rfc6901), as well as the additional relative json-pointer suggestion as laid out by [Relative JSON Pointer proposal](https://json-schema.org/draft/2020-12/relative-json-pointer#RFC8259).
 
-All examples and rules defined in these documents should be expected to function with the same behavior.
+Relative JSON Pointers follow the linked 2020 draft's syntax: an upward distance (`0`, `1`, etc.), an optional array index shift (`+1` or `-1`), then either a JSON Pointer suffix or a terminal `#` key lookup. Chaining pointers in a `string[]` is a library extension, not part of that draft. A relative pointer is not a URI fragment; `#` alone denotes the document root in this API, while `0#` reads the current key.
+
+This update changes earlier behavior: leading-zero distances or shifts are rejected; computed array keys are numbers rather than strings; `#` after a chained pointer no longer means its relative key (use `0#`); reads of missing members and `/array/-` now fail. URI fragments decode percent escapes, but plain and relative pointers retain literal percent signs. These parsing changes affect callers relying on 1.x permissive behavior.
+
+## Security and compatibility of the current 1.x API
+
+Pointer traversal and writes reject `__proto__`, `constructor`, and `prototype` tokens, even when the names are escaped in an input pointer. This deliberately restricts some otherwise valid JSON property names to prevent writes through JavaScript prototype objects. Inherited members cannot be traversed, and advanced caller-supplied reference trees must point into the supplied document. Untrusted pointers should still be subject to application-level limits on length and depth.
+
+**Important:** The 1.x API implicitly follows `$ref` during both reads and writes. It is intended for trusted schema-style navigation, not for editing arbitrary JSON containing `$ref` properties. Full JSON Schema 2020-12 URI and dynamic-reference resolution and raw-by-default traversal are planned for v2; the current API is not a JSON Schema validator or a full 2020-12 reference resolver.
 
 ## Methods
 
@@ -92,9 +108,9 @@ console.log(getByPointer(['/foo/1', '0-1'], jsonObj))
 // bar
 ```
 
-If we were on `"baz"` and wanted to know the index of the reference we occupied within the parent array, we could ask for the index with `#`.
+If we were on `"baz"` and wanted to know the index of the reference we occupied within the parent array, we could ask for the index with `0#`. Array indices are returned as numbers.
 ```javascript
-console.log(getByPointer(['/foo/1', '#'], jsonObj))
+console.log(getByPointer(['/foo/1', '0#'], jsonObj))
 // 1
 ```
 
@@ -130,6 +146,7 @@ console.log(getByPointer('/highly', jsonObj))
 ```
 
 You may also use `setByPointer` to append values to the end of an array using the `-` operator.
+Writing at an array index equal to its length also appends (for example, writing to `/items/3` when `items` has three elements). Reading that index before the write still fails, and writing beyond the end fails rather than creating sparse entries. Array append is a write-specific library behavior, not an RFC 6901 read requirement.
 ```javascript
 console.log(getByPointer('/foo', jsonObj))
 // ["bar","baz"]
