@@ -8,24 +8,34 @@ The playground demonstrates the capabilities of this library.
 
 ### Repository playground (current source)
 
-The React playground in [playground/](playground/) imports the library directly from this repository. It lets you edit a JSON document, run `getByPointer`, or supply a JSON value and run `setByPointer`. After a write, the document editor displays the mutated data, and the output shows the previous value and updated document. You can also supply a JSON array of pointer strings to try chained leaflet-relative navigation. Inputs run locally in the browser; the playground does not send them to a server.
+The React playground in [playground/](playground/) imports the library directly from this repository. It lets you edit a JSON document and choose between raw operations and explicit local schema-reference navigation; use **Load schema reference example** to try the latter. After a write, the document editor displays the mutated data, and the output shows the previous value and updated document. You can also supply a JSON array of pointer strings to try chained leaflet-relative navigation. Inputs run locally in the browser; the playground does not send them to a server.
+
+Choose **Docs** in the playground header to browse the v2 beta API reference. The desktop documentation has a left-hand topic navigation and a detailed article on the right; smaller screens offer a grouped topic selector. The documentation includes every exported function and TypeScript type, with separate synchronous and asynchronous guidance. Once GitHub Pages is configured, [open the documentation directly](https://ryanrutkin.github.io/json-pointer-relational/#/docs/overview).
 
 From the repository root, install playground dependencies once with `npm run playground:install`, then start it with `npm run playground`. Open the local URL shown by Vite (typically `http://127.0.0.1:5173/json-pointer-relational/`). Use `npm run playground:build` to verify the production build or `npm run playground:preview` to inspect it locally. Playground dependencies are separate from the library and its files are excluded from the npm package.
 
 The [Pages deployment workflow](.github/workflows/playground.yml) builds and publishes only the playground on pushes to `master` or via manual dispatch. After merging, set the repository's **Settings → Pages → Build and deployment → Source** to **GitHub Actions**. The site will be served at `https://ryanrutkin.github.io/json-pointer-relational/` once the workflow completes. Publishing the playground does not publish a new npm package.
 
-## Funtionality
+## Functionality
 This library adheres to the rules for interpretting a json-pointer as laid out by the [RFC 6901 proposed standard](https://datatracker.ietf.org/doc/html/rfc6901), as well as the additional relative json-pointer suggestion as laid out by [Relative JSON Pointer proposal](https://json-schema.org/draft/2020-12/relative-json-pointer#RFC8259).
 
 Relative JSON Pointers follow the linked 2020 draft's syntax: an upward distance (`0`, `1`, etc.), an optional array index shift (`+1` or `-1`), then either a JSON Pointer suffix or a terminal `#` key lookup. Chaining pointers in a `string[]` is a library extension, not part of that draft. A relative pointer is not a URI fragment; `#` alone denotes the document root in this API, while `0#` reads the current key.
 
 This update changes earlier behavior: leading-zero distances or shifts are rejected; computed array keys are numbers rather than strings; `#` after a chained pointer no longer means its relative key (use `0#`); reads of missing members and `/array/-` now fail. URI fragments decode percent escapes, but plain and relative pointers retain literal percent signs. These parsing changes affect callers relying on 1.x permissive behavior.
 
-## Security and compatibility of the current 1.x API
+## v2 beta: explicit schema navigation and migration
 
-Pointer traversal and writes reject `__proto__`, `constructor`, and `prototype` tokens, even when the names are escaped in an input pointer. This deliberately restricts some otherwise valid JSON property names to prevent writes through JavaScript prototype objects. Inherited members cannot be traversed, and advanced caller-supplied reference trees must point into the supplied document. Untrusted pointers should still be subject to application-level limits on length and depth.
+This is an unreleased v2 beta in the repository; installing the latest published 1.x package will **not** provide these APIs. The synchronous `getByPointer`, `getReferenceByPointer`, and `setByPointer` now treat `$ref` as an ordinary JSON member. Schema navigation is an explicit asynchronous operation; it is *reference navigation*, not JSON Schema instance validation. The linked 2020 Relative JSON Pointer draft remains the grammar for relative pointers in both modes (`0-1`, `0#`, `1#`, and optional pointer suffix). Chaining strings remains a library extension.
 
-**Important:** The 1.x API implicitly follows `$ref` during both reads and writes. It is intended for trusted schema-style navigation, not for editing arbitrary JSON containing `$ref` properties. Full JSON Schema 2020-12 URI and dynamic-reference resolution and raw-by-default traversal are planned for v2; the current API is not a JSON Schema validator or a full 2020-12 reference resolver.
+`setByPointer(value, pointer, root)` mutates `root` and returns a **detached deep copy of the previous JSON-compatible leaflet value** (`undefined` for a new member). The copy is taken before writing; cyclic values, getters, non-JSON values and invalid input fail before mutation. An in-place root replacement is rejected. `setByPointerImmutable(value, pointer, root)` instead returns a new root: only containers on the resolved path are copied; other branches retain their identity. It also supports root replacement. Missing intermediate containers are not created. Both setters accept `-` or `index === length` for append to an array (write-only extension).
+
+`resolveSchemaByPointer(pointer, schema, { baseURI, loadResource?, dynamicScope?, from?, maxHops?, maxLoads? })` returns a promise of `{ value, resourceURI, path, documentPath, documentURI, documentRoot, point, hops, dynamicScope }`. It follows `$ref` and `$dynamicRef` to known local and embedded `$id` resources, pointer fragments and `$anchor`/`$dynamicAnchor`. For external resources, supply a `loadResource(uri)` callback; no network requests are made automatically. The callback must enforce its own allowlist, size limits and SSRF policy. `from` accepts a prior resolution to continue from a leaflet, including a 2020-draft relative pointer. The `dynamicScope` argument lists resource URIs from outermost to innermost; this is caller-provided evaluation context, **not** an instance validator.
+
+`setSchemaByPointer(value, pointer, schema, options)` is an opt-in asynchronous mutation of an **existing** resolved target. It returns the old leaflet snapshot. Local document writes are permitted; writes into a loaded external document additionally require both `mutableResources` (a `Map` from document URI to the exact loaded object) and `authorizeExternalWrite(target)` returning true. The resolver does not fetch or mutate external data without these callbacks. It rejects root writes, computed keys and ambiguous `$ref` plus `$dynamicRef` navigation rather than guessing validation semantics.
+
+Pointer traversal and writes reject `__proto__`, `constructor`, and `prototype` tokens, even when escaped. This deliberately restricts some valid JSON property names to avoid prototype pollution. Inherited members are not traversed. Untrusted pointer inputs still need application-level length/depth limits. URI handling uses the platform URL implementation, not arbitrary URI schemes unsupported by that implementation; the schema mode does not process validation assertions or multiple applicators into a combined validation result.
+
+**Migrating from 1.x:** Move reads that intentionally follow references to `await resolveSchemaByPointer(...)`; use `await setSchemaByPointer(...)` only when deliberately editing through schema references. Ordinary schema editing can use the raw setters without reference redirects. The previous-value return stays, but is now a detached snapshot. Mutable root writes throw. Other pointer parsing changes (including `0#` and strict array indexes) are documented above.
 
 ## Methods
 
@@ -51,7 +61,7 @@ Pointer traversal and writes reject `__proto__`, `constructor`, and `prototype` 
 : `type: Record<string, any>` - A JSON compatible object. This object is expected to be JSON compatible.
 
 #### Return
-`type: any` - The result will be the previous value of the final referencer point reached by resolving all supplied JSON Pointers.
+`type: any` - A detached deep copy of the previous JSON-compatible value at the final pointer location, or `undefined` if absent. It does not return the document.
 [^note]: Unlike `getByPointer`, you may use a JSON Pointer that resolves to the non-existent index at the end of an array.
 
 
@@ -78,7 +88,7 @@ Pointer traversal and writes reject `__proto__`, `constructor`, and `prototype` 
 - normalizedPath
 : `type: string` - A direct path to this node within the data tree. This might not be the same path that was taken to reach this node, but should represent the most direct path.
 - parent
-: `type: RefPoint | null` - A RefPoint of the immediate parent node, if available. If a `$ref` was resolved, this will represent the immediate parent of the object resolved from the `$ref`.
+: `type: RefPoint | null` - A RefPoint of the immediate parent node, if available. Synchronous raw navigation does not follow `$ref`; use the explicit schema resolver for reference targets.
 
 
 ## Examples

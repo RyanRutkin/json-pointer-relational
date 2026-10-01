@@ -7,7 +7,7 @@ export type RefPoint = {
     computed?: boolean;
 }
 
-// Security restriction for the 1.x API: JSON can contain these keys, but
+// Security restriction: JSON can contain these keys, but
 // following or assigning them through JavaScript's prototype chain is unsafe.
 function assertSafeKey(key: string): void {
     if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
@@ -38,10 +38,11 @@ function assertTrustedTree(tree: RefPoint[], root: object): void {
             const parent: RefPoint = current.parent;
             assertSafeKey(current.key);
             assertSafeContainer(parent.obj);
+            const own = parent.obj && typeof parent.obj === 'object'
+                ? Object.getOwnPropertyDescriptor(parent.obj, current.key) : undefined;
             if (!parent.obj || typeof parent.obj !== 'object' ||
-                !Object.keys(parent.obj).some(key =>
-                    key !== '__proto__' && key !== 'constructor' && key !== 'prototype' && parent.obj[key] === current!.obj) &&
-                !(current.obj === undefined && !Object.prototype.hasOwnProperty.call(parent.obj, current.key))) {
+                (own && (!('value' in own) || own.value !== current.obj)) ||
+                (!own && current.obj !== undefined)) {
                 throw new Error('Invalid JSON Pointer reference tree');
             }
             current = parent;
@@ -217,27 +218,14 @@ function resolveReferenceByPointer(pointers: string[] | string, obj: Record<stri
                 (partIdx < tokens.length - 1 || pointerIdx < pointers.length - 1 || !allowFinalArrayAppend)) {
                 throw new Error(`Invalid JSON Pointer. Cannot read or traverse missing property: ${token}`);
             }
-            // Handle $ref
-            // TODO - Test for infinite recursion error. Will it break?
             let newRef = Object.prototype.hasOwnProperty.call(curRef.obj, token) ? curRef.obj[token] : undefined;
-            if (newRef && typeof newRef === 'object' && !Array.isArray(newRef) &&
-                Object.prototype.hasOwnProperty.call(newRef, '$ref') && newRef['$ref']) {
-                const resolvedRef = getReferenceByPointer([newRef['$ref']], obj, refPoints);
-                // Use parent from the resolved ref
-                // If we were to set a value using a path that required a resolved ref,
-                // the tree referenced would need to be from the resolved area downward.
-                // A reference hop changes the physical location. Relative
-                // pointers subsequently ascend from that location, not the alias.
-                refPoints = physicalChain(resolvedRef);
-            } else {
-                const prevRef = refPoints[refPoints.length - 1];
-                refPoints.push({
-                    obj: newRef,
-                    key: token,
-                    normalizedPath: `${prevRef.normalizedPath}/${escapeJsonPointerToken(token)}`,
-                    parent: prevRef
-                });
-            }
+            const prevRef = refPoints[refPoints.length - 1];
+            refPoints.push({
+                obj: newRef,
+                key: token,
+                normalizedPath: `${prevRef.normalizedPath}/${escapeJsonPointerToken(token)}`,
+                parent: prevRef
+            });
             curRef = refPoints[refPoints.length - 1];
             // End logic for Object
         }
@@ -260,16 +248,17 @@ export function setByPointerWithRef(value: any, pointers: string[] | string, obj
     const ref = resolveReferenceByPointer(pointers, obj, tree, true);
     if (ref.computed) throw new Error('Invalid JSON Pointer for SET. A relative key is not a writable location.');
     if (!ref.parent) {
-        // throw new Error('Invalid JSON Pointer for SET. Cannot set root document');
-        // Oddly, there are some instances where setting the root document through this method makes sense.
-        obj = value;
-        return obj;
+        throw new Error('Invalid JSON Pointer for SET. Cannot replace root in place.');
     }
     assertSafeKey(ref.key);
     assertSafeContainer(ref.parent.obj);
     if (ref.parent.obj === null || typeof ref.parent.obj !== 'object') {
         throw new Error('Invalid JSON Pointer for SET. Parent is not an object');
     }
+    // Validate both sides before committing; a failed clone cannot leave a
+    // document partially updated. Snapshot only the old leaflet, not the root.
+    cloneJson(value);
+    const previous = ref.obj === undefined ? undefined : cloneJson(ref.obj);
     if (Array.isArray(ref.parent.obj) && ref.key === '-') {
         ref.parent.obj.push(value);
     } else if (Array.isArray(ref.parent.obj)) {
@@ -279,7 +268,7 @@ export function setByPointerWithRef(value: any, pointers: string[] | string, obj
     } else {
         throw new Error(`Invalid JSON Pointer for SET. Cannot set property ${ref.key} of ${typeof ref.parent}`);
     }
-    return ref;
+    return { ...ref, obj: previous };
 }
 
 export function setByPointer(value: any, pointer: string, obj: Record<string, any>): any;
@@ -288,4 +277,60 @@ export function setByPointer(value: any, pointers: string[] | string, obj: Recor
 export function setByPointer(value: any, pointers: string[] | string, obj: Record<string, any>): any {
     const ref = setByPointerWithRef(value, pointers, obj);
     return ref.obj;
+}
+
+/** Copy and validate only JSON-compatible values. Reject getters, cycles and sparse arrays. */
+function cloneJson(value: any, ancestors = new Set<object>()): any {
+    if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    if (typeof value !== 'object' || ancestors.has(value) ||
+        (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null && !Array.isArray(value))) {
+        throw new Error('Expected an acyclic JSON-compatible value');
+    }
+    ancestors.add(value);
+    const result: any = Array.isArray(value) ? [] : {};
+    const keys = Object.keys(value);
+    if (Array.isArray(value) && (keys.length !== value.length || keys.some((key, i) => key !== String(i)))) {
+        throw new Error('Expected an acyclic JSON-compatible value (dense array)');
+    }
+    for (const key of keys) {
+        const descriptor = Object.getOwnPropertyDescriptor(value, key);
+        if (!descriptor || !('value' in descriptor)) throw new Error('Expected an acyclic JSON-compatible value');
+        Object.defineProperty(result, key, { value: cloneJson(descriptor.value, ancestors), enumerable: true, writable: true, configurable: true });
+    }
+    ancestors.delete(value);
+    return result;
+}
+
+/** Return a new root, copying only containers on the resolved physical path. */
+export function setByPointerImmutable(value: any, pointers: string | string[], obj: Record<string, any>): any {
+    cloneJson(value);
+    const ref = resolveReferenceByPointer(pointers, obj, undefined, true);
+    if (ref.computed) throw new Error('Invalid JSON Pointer for SET. A relative key is not a writable location.');
+    if (!ref.parent) return value;
+    // The last item may be absent; existing containers must be real JSON data.
+    let updated = value;
+    let child = ref;
+    while (child.parent) {
+        const parent = child.parent;
+        assertSafeKey(child.key);
+        assertSafeContainer(parent.obj);
+        const copy: any = Array.isArray(parent.obj) ? parent.obj.slice() : Object.create(null);
+        if (!Array.isArray(copy)) {
+            for (const key of Object.keys(parent.obj)) {
+                const descriptor = Object.getOwnPropertyDescriptor(parent.obj, key);
+                if (!descriptor || !('value' in descriptor)) throw new Error('Expected an acyclic JSON-compatible value');
+                Object.defineProperty(copy, key, { value: descriptor.value, writable: true, enumerable: true, configurable: true });
+            }
+        }
+        if (Array.isArray(copy)) {
+            if (child.key === '-' || Number(child.key) === copy.length) copy.push(updated);
+            else copy[Number(child.key)] = updated;
+        } else {
+            Object.defineProperty(copy, child.key, { value: updated, writable: true, enumerable: true, configurable: true });
+        }
+        updated = copy;
+        child = parent;
+    }
+    return updated;
 }
