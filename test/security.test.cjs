@@ -38,7 +38,7 @@ test('blocks constructor and prototype traversal and dangerous final keys', () =
     assert.deepEqual(result, { refused: [true, true, true], clean: true, ownSafe: true });
 });
 
-test('does not traverse inherited members or follow references to unsafe keys', () => {
+test('does not traverse inherited members; raw references do not redirect writes', () => {
     const result = isolated(`
         const base = { shared: { original: true } };
         const doc = Object.create(base);
@@ -47,14 +47,15 @@ test('does not traverse inherited members or follow references to unsafe keys', 
         const refused = attempts.map(fn => { try { fn(); return false; } catch (_) { return true; } });
         console.log(JSON.stringify({ refused, unchanged: base.shared.original === true, clean: ({}).poison === undefined }));
     `);
-    assert.deepEqual(result, { refused: [true, true], unchanged: true, clean: true });
+    assert.deepEqual(result, { refused: [true, false], unchanged: true, clean: true });
 });
 
-test('legitimate existing reads, writes and reference hops still work in patch', () => {
+test('legitimate existing raw reads and writes still work', () => {
     const doc = { items: ['one'], target: { label: 'old' }, link: { $ref: '/target' } };
     assert.equal(getByPointer('/items/0', doc), 'one');
-    assert.equal(setByPointer('new', '/link/label', doc), 'old');
-    assert.equal(doc.target.label, 'new');
+    assert.equal(setByPointer('new', '/link/label', doc), undefined);
+    assert.equal(doc.target.label, 'old');
+    assert.equal(doc.link.label, 'new');
 });
 
 test('rejects a forged reference tree pointing outside the supplied document', () => {

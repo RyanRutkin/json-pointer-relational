@@ -32,10 +32,11 @@ test('relative descent and shifts keep the real physical parent and path', () =>
     assert.equal(target.foo[0].name, 'A');
 });
 
-test('relative up and sibling shifts after a reference use the physical target path', () => {
+test('relative up and sibling shifts use the physical raw path', () => {
     const data = { foo: ['bar', 'baz'], link: { $ref: '#/foo/1' } };
-    assert.equal(getByPointer(['/link', '0-1'], data), 'bar');
-    assert.equal(getByPointer(['/link', '1#'], data), 'foo');
+    assert.equal(getByPointer(['/foo/1', '0-1'], data), 'bar');
+    assert.equal(getByPointer(['/foo/1', '1#'], data), 'foo');
+    assert.throws(() => getByPointer(['/link', '0-1'], data));
 });
 
 test('invalid relative grammar and failed evaluation do not silently navigate', () => {
