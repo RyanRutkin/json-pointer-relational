@@ -99,11 +99,12 @@ export async function resolveSchemaByPointer(
         if (!schemaValue(value)) throw new Error('Loaded resource must be an object or boolean schema');
         const doc: DocumentIndex = { root: value, retrievalURI, schemas: new Map() };
         let nodes = 0;
+        const maxNodes = 10000;
         const stack: Array<{ value: unknown; path: string; resource?: Resource; resourcePath: string; depth: number }> =
             [{ value, path: '', resourcePath: '', depth: 0 }];
         while (stack.length) {
             const node = stack.pop()!;
-            if (++nodes > 10000 || node.depth > 128) throw new Error('Schema index limit exceeded');
+            if (++nodes > maxNodes || node.depth > 128) throw new Error('Schema index limit exceeded');
             if (!schemaValue(node.value)) throw new Error(`Expected schema at ${node.path}`);
             let resource = node.resource;
             let resourcePath = node.resourcePath;
@@ -135,13 +136,19 @@ export async function resolveSchemaByPointer(
                 if (!has(node.value, key)) continue;
                 const child = own(node.value, key);
                 const entries: Array<[string, unknown]> = [];
-                if (single.has(key)) entries.push([key, child]);
+                if (single.has(key)) {
+                    if (nodes + stack.length + 1 > maxNodes) throw new Error('Schema index limit exceeded');
+                    entries.push([key, child]);
+                }
                 else if (arrays.has(key)) {
                     if (!Array.isArray(child)) throw new Error(`Expected schema array at ${key}`);
+                    if (child.length > maxNodes - nodes - stack.length) throw new Error('Schema index limit exceeded');
                     for (let i = 0; i < child.length; i++) entries.push([`${key}/${i}`, own(child, String(i))]);
                 } else {
                     if (!child || typeof child !== 'object' || Array.isArray(child)) throw new Error(`Expected schema map at ${key}`);
-                    for (const name of Object.keys(child)) entries.push([`${key}/${escape(name)}`, own(child, name)]);
+                    const names = Object.keys(child);
+                    if (names.length > maxNodes - nodes - stack.length) throw new Error('Schema index limit exceeded');
+                    for (const name of names) entries.push([`${key}/${escape(name)}`, own(child, name)]);
                 }
                 for (const [suffix, entry] of entries) stack.push({
                     value: entry, path: `${node.path}/${suffix}`, resource,
@@ -151,9 +158,11 @@ export async function resolveSchemaByPointer(
         }
         documents.set(retrievalURI, doc);
         // A retrieval URI can alias the document root even if it declares a different $id.
-        if (resources.has(retrievalURI) && resources.get(retrievalURI)!.doc !== doc) {
+        const rootResource = doc.schemas.get('')!.resource;
+        if (resources.has(retrievalURI) && resources.get(retrievalURI) !== rootResource) {
             throw new Error(`Duplicate retrieval URI: ${retrievalURI}`);
         }
+        resources.set(retrievalURI, rootResource);
         return doc;
     }
 
@@ -196,6 +205,7 @@ export async function resolveSchemaByPointer(
     let current = cursor(rootDoc, '');
     let hops: SchemaHop[] = [];
     const scope: string[] = [];
+    const explicitScope: string[] = [];
     function enter(resourceURI: string): void {
         if (!scope.includes(resourceURI)) scope.push(resourceURI);
     }
@@ -207,6 +217,7 @@ export async function resolveSchemaByPointer(
         const normalized = uri(entry, base);
         if (normalized.includes('#')) throw new Error('dynamicScope entries must be resource URIs');
         enter(normalized);
+        if (!explicitScope.includes(normalized)) explicitScope.push(normalized);
     }
     if (options.from) {
         const from = options.from;
@@ -236,12 +247,7 @@ export async function resolveSchemaByPointer(
         external.add(resourceURI);
         const loaded = await options.loadResource(resourceURI);
         const doc = indexDocument(loaded, resourceURI);
-        const resolved = resources.get(resourceURI);
-        if (resolved) return resolved;
-        // Retrieval URI is also an identifier for the fetched document root.
-        const alias = doc.schemas.get('')!.resource;
-        resources.set(resourceURI, alias);
-        return alias;
+        return doc.schemas.get('')!.resource;
     }
 
     async function at(target: string): Promise<Cursor> {
@@ -322,6 +328,10 @@ export async function resolveSchemaByPointer(
         if (part === '' || part === '#' || part.startsWith('/') || part.startsWith('#/')) {
             // Absolute pointers are always rooted in the supplied document (not the last referenced resource).
             current = cursor(rootDoc, '');
+            scope.length = 0;
+            scope.push(...explicitScope);
+            hops = [];
+            visited.clear();
             enter(current.location.resource.uri);
         }
         const tokens = pointerTokens(part);

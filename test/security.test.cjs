@@ -82,3 +82,71 @@ test('never writes into a constructor prototype supplied as a root', () => {
     `);
     assert.deepEqual(result, { refused: true, clean: true });
 });
+
+test('ordinary missing member writes never invoke an inherited setter', () => {
+    const result = isolated(`
+        Object.defineProperty(Object.prototype, 'injected', {
+            configurable: true,
+            set(value) { Object.prototype.polluted = value; }
+        });
+        const target = {};
+        try {
+            const previous = setByPointer('yes', '/injected', target);
+            console.log(JSON.stringify({ previousWasMissing: previous === undefined,
+                own: Object.hasOwn(target, 'injected'), value: target.injected,
+                clean: ({}).polluted === undefined }));
+        } finally {
+            delete Object.prototype.injected;
+            delete Object.prototype.polluted;
+        }
+    `);
+    assert.deepEqual(result, { previousWasMissing: true, own: true, value: 'yes', clean: true });
+});
+
+test('an own accessor at the final write destination is rejected before invoking it', () => {
+    const result = isolated(`
+        const target = {};
+        let accessed = false;
+        Object.defineProperty(target, 'item', { configurable: true, enumerable: true,
+            get() { accessed = true; return 'old'; }, set(_) { accessed = true; }
+        });
+        let refused = false;
+        try { setByPointer('new', '/item', target); } catch (_) { refused = true; }
+        console.log(JSON.stringify({ refused, accessed, stillAccessor: !!Object.getOwnPropertyDescriptor(target, 'item').get }));
+    `);
+    assert.deepEqual(result, { refused: true, accessed: false, stillAccessor: true });
+});
+
+    test('array append cannot invoke an inherited numeric setter', () => {
+        const result = isolated(`
+            const target = { items: ['first'] };
+            const customPrototype = Object.create(Array.prototype);
+            Object.defineProperty(customPrototype, '1', {
+                configurable: true,
+                set(value) { Object.prototype.polluted = value; }
+            });
+            Object.setPrototypeOf(target.items, customPrototype);
+            try {
+                const old = setByPointer('second', '/items/-', target);
+                console.log(JSON.stringify({ missing: old === undefined, own: Object.hasOwn(target.items, 1),
+                    value: target.items[1], clean: ({}).polluted === undefined }));
+            } finally {
+                delete Object.prototype.polluted;
+            }
+        `);
+        assert.deepEqual(result, { missing: true, own: true, value: 'second', clean: true });
+    });
+
+    test('an own accessor array element is rejected without invoking it', () => {
+        const result = isolated(`
+            const array = ['first'];
+            let accessed = false;
+            Object.defineProperty(array, '0', { configurable: true, enumerable: true,
+                get() { accessed = true; return 'first'; }, set(_) { accessed = true; }
+            });
+            let refused = false;
+            try { setByPointer('changed', '/items/0', { items: array }); } catch (_) { refused = true; }
+            console.log(JSON.stringify({ refused, accessed, stillAccessor: !!Object.getOwnPropertyDescriptor(array, '0').get }));
+        `);
+        assert.deepEqual(result, { refused: true, accessed: false, stillAccessor: true });
+    });

@@ -13,8 +13,8 @@ export interface SchemaWriteOptions extends SchemaResolveOptions {
 export async function setSchemaByPointer(
     value: unknown, pointer: string | string[], root: unknown, options: SchemaWriteOptions
 ): Promise<unknown> {
-    // Validate/snapshot inputs before awaiting a loader or an authorization callback.
-    // The raw setter validates once again just before committing the write.
+    // Resolve first; the raw setter validates and snapshots immediately before
+    // committing, after any asynchronous loader and authorization callbacks.
     const target = await resolveSchemaByPointer(pointer, root, options);
     if (!target.point?.parent || target.documentPath.endsWith('#')) {
         throw new Error('Cannot write a schema root or a computed relative key');
@@ -24,6 +24,9 @@ export async function setSchemaByPointer(
         if (registered !== target.documentRoot || !options.authorizeExternalWrite ||
             !(await options.authorizeExternalWrite(target))) {
             throw new Error(`External schema write is not authorized: ${target.documentURI}`);
+        }
+        if (options.mutableResources?.get(target.documentURI) !== target.documentRoot) {
+            throw new Error(`External schema write registration was revoked: ${target.documentURI}`);
         }
     }
     // Authorization is asynchronous. A callback may have replaced a container

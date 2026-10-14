@@ -80,3 +80,18 @@ test('authorization cannot overwrite a leaf changed while approval was pending',
     }), /changed/);
     assert.equal(external.$defs.target.type, 'boolean');
 });
+
+test('authorization cannot proceed after mutable resource registration is revoked or replaced', async () => {
+    const resourceURI = 'https://example.test/external.json';
+    const root = { $id: baseURI, properties: { item: { $ref: 'external.json#/$defs/target' } } };
+    for (const revoke of [registry => registry.delete(resourceURI),
+        registry => registry.set(resourceURI, { different: true })]) {
+        const external = { $id: resourceURI, $defs: { target: { type: 'string' } } };
+        const registry = new Map([[resourceURI, external]]);
+        await assert.rejects(setSchemaByPointer('number', '/properties/item/type', root, {
+            baseURI, loadResource: async () => external, mutableResources: registry,
+            authorizeExternalWrite: async () => { revoke(registry); return true; }
+        }), /authorized|registration|revok/i);
+        assert.equal(external.$defs.target.type, 'string');
+    }
+});

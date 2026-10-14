@@ -153,3 +153,70 @@ test('external leaflets retain their own document for relative siblings', async 
     assert.equal(next.documentPath, '/$defs/items/prefixItems/1/type');
     await assert.rejects(resolve('0+1/type', root, { ...options, from: { ...leaf, value: {} } }), /Stale/);
 });
+
+test('the root retrieval URI aliases its canonical $id without loading', async () => {
+    const retrievalURI = 'https://example.test/retrieval.json';
+    const canonicalURI = 'https://example.test/canonical.json';
+    const root = { $id: canonicalURI, $defs: {
+        target: { $anchor: 'name', type: 'string' },
+        byPointer: { $ref: retrievalURI + '#/$defs/target' },
+        byAnchor: { $ref: retrievalURI + '#name' }
+    } };
+    let loads = 0;
+    for (const pointer of ['/$defs/byPointer/type', '/$defs/byAnchor/type']) {
+        const result = await resolve(pointer, root, { baseURI: retrievalURI, maxLoads: 0,
+            loadResource: async () => { loads++; return { type: 'wrong' }; } });
+        assert.equal(result.value, 'string');
+        assert.equal(result.resourceURI, canonicalURI);
+        assert.equal(result.documentURI, retrievalURI);
+    }
+    assert.equal(loads, 0);
+});
+
+test('retrieval URI collision with another embedded resource is rejected', async () => {
+    const retrievalURI = 'https://example.test/retrieval.json';
+    const root = { $id: 'https://example.test/canonical.json', $defs: {
+        embedded: { $id: retrievalURI, type: 'string' }
+    } };
+    await assert.rejects(resolve('', root, { baseURI: retrievalURI }), /Duplicate retrieval URI/);
+});
+
+test('an absolute pointer discards only scope and hops inherited from a previous leaflet', async () => {
+    const rootURI = 'https://example.test/main.json';
+    const targetURI = 'https://example.test/target.json';
+    const otherURI = 'https://example.test/other.json';
+    const root = { $id: rootURI, $defs: { use: { $dynamicRef: 'target.json#node' },
+        away: { $ref: 'other.json#/$defs/leaf' } } };
+    const target = { $id: targetURI, $dynamicAnchor: 'node', type: 'string' };
+    const other = { $id: otherURI, $dynamicAnchor: 'node', type: 'number', $defs: { leaf: true } };
+    const loadResource = async uri => uri === targetURI ? target : other;
+    const options = { baseURI: rootURI, loadResource };
+    const direct = await resolve('/$defs/use/type', root, options);
+    const from = await resolve('/$defs/away', root, options);
+    const restarted = await resolve('/$defs/use/type', root, { ...options, from });
+    assert.equal(direct.value, 'string');
+    assert.equal(restarted.value, direct.value);
+    assert.deepEqual(restarted.hops, direct.hops);
+    assert.deepEqual(restarted.dynamicScope, direct.dynamicScope);
+    const explicitlyScoped = await resolve('/$defs/use/type', root,
+        { ...options, from, dynamicScope: [otherURI] });
+    assert.equal(explicitlyScoped.value, 'number');
+    const chained = await resolve(['/$defs/away', '/$defs/use/type'], root, options);
+    assert.equal(chained.value, 'string');
+    assert.deepEqual(chained.hops, direct.hops);
+});
+
+test('schema index rejects oversized fan-out before inspecting late children', async () => {
+    for (const keyword of ['allOf', '$defs']) {
+        let inspected = false;
+        const children = keyword === 'allOf' ? Array(10001).fill(true) : {};
+        if (keyword === '$defs') {
+            for (let i = 0; i < 10001; i++) children['key' + i] = true;
+        }
+        const lastKey = keyword === 'allOf' ? '10000' : 'key10000';
+        Object.defineProperty(children, lastKey, { enumerable: true, configurable: true,
+            get() { inspected = true; return true; } });
+        await assert.rejects(resolve('', { $id: baseURI, [keyword]: children }, options), /index limit/);
+        assert.equal(inspected, false, keyword + ' should not inspect out-of-budget child');
+    }
+});

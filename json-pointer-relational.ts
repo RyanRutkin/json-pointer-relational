@@ -200,8 +200,12 @@ function resolveReferenceByPointer(pointers: string[] | string, obj: Record<stri
                     throw new Error(`Invalid JSON Pointer. Referenced index exceeds parent array length. Pointer ${pointerIdx}. ${ pointers[pointerIdx] }`);
                 }
                 const prevRef = refPoints[refPoints.length - 1];
+                const element = Object.getOwnPropertyDescriptor(curRef.obj, token);
+                if (element && !('value' in element)) {
+                    throw new Error(`Invalid JSON Pointer. Cannot access property accessor: ${token}`);
+                }
                 refPoints.push({
-                    obj: curRef.obj[numToken],
+                    obj: element ? element.value : undefined,
                     key: token,
                     normalizedPath: `${prevRef.normalizedPath}/${String(numToken)}`,
                     parent: curRef
@@ -214,11 +218,15 @@ function resolveReferenceByPointer(pointers: string[] | string, obj: Record<stri
                 throw new Error(`Invalid JSON Pointer. Attempt to index non-object. Pointer ${pointerIdx}. ${ pointers[pointerIdx] }`);
             }
             assertSafeContainer(curRef.obj);
-            if (!Object.prototype.hasOwnProperty.call(curRef.obj, token) &&
+            const member = Object.getOwnPropertyDescriptor(curRef.obj, token);
+            if (member && !('value' in member)) {
+                throw new Error(`Invalid JSON Pointer. Cannot access property accessor: ${token}`);
+            }
+            if (!member &&
                 (partIdx < tokens.length - 1 || pointerIdx < pointers.length - 1 || !allowFinalArrayAppend)) {
                 throw new Error(`Invalid JSON Pointer. Cannot read or traverse missing property: ${token}`);
             }
-            let newRef = Object.prototype.hasOwnProperty.call(curRef.obj, token) ? curRef.obj[token] : undefined;
+            let newRef = member ? member.value : undefined;
             const prevRef = refPoints[refPoints.length - 1];
             refPoints.push({
                 obj: newRef,
@@ -259,14 +267,20 @@ export function setByPointerWithRef(value: any, pointers: string[] | string, obj
     // document partially updated. Snapshot only the old leaflet, not the root.
     cloneJson(value);
     const previous = ref.obj === undefined ? undefined : cloneJson(ref.obj);
-    if (Array.isArray(ref.parent.obj) && ref.key === '-') {
-        ref.parent.obj.push(value);
-    } else if (Array.isArray(ref.parent.obj)) {
-        ref.parent.obj[parseInt(ref.key)] = value;
-    } else if (typeof ref.parent.obj === 'object') {
-        ref.parent.obj[ref.key] = value;
+    // Defining an own data property avoids inherited setters on both objects
+    // and arrays (including Array.prototype numeric accessors on append).
+    const key = Array.isArray(ref.parent.obj) && ref.key === '-'
+        ? String(ref.parent.obj.length) : ref.key;
+    const existing = Object.getOwnPropertyDescriptor(ref.parent.obj, key);
+    if (existing) {
+        if (!('value' in existing) || !existing.writable) {
+            throw new Error(`Invalid JSON Pointer for SET. Cannot write property ${key}`);
+        }
+        Object.defineProperty(ref.parent.obj, key, { value });
     } else {
-        throw new Error(`Invalid JSON Pointer for SET. Cannot set property ${ref.key} of ${typeof ref.parent}`);
+        Object.defineProperty(ref.parent.obj, key, {
+            value, writable: true, enumerable: true, configurable: true
+        });
     }
     return { ...ref, obj: previous };
 }
